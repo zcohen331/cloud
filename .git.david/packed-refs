@@ -1,0 +1,24 @@
+# pack-refs with: peeled fully-peeled 
+0b209a5bb03e49f93d39098cf7abebfbf12cc631 refs/remotes/origin/10.0
+46f8301fdcd053d6ead22f4ac5b542661256f8a3 refs/remotes/origin/10.0-ceph
+5ed42dc8f5eb9ce19b666c9c5c2ee054da22da92 refs/remotes/origin/11.0
+fc7f70ef858de8a18d07535d6d5ff6d70e0a8de5 refs/remotes/origin/12.0
+555c40dd406b19d6336b7585941b97cc5be1d1fd refs/remotes/origin/13.0
+ab25ab68cf71445cbb9b78c5447b1235c684fc95 refs/remotes/origin/13.0-ceph
+c4a5dd99ed037984706e1c4cdf90cb8d1b648637 refs/remotes/origin/13.0-instanceha
+ec4b439b33594d7d614348eedbe99181fc7b3039 refs/remotes/origin/13.0-ovn
+00186bc7fe3960ba3cab255d6d7dacdc11187199 refs/remotes/origin/14.0
+755ec89be6b7ffb3068bf7f080e9e8a586559850 refs/remotes/origin/15.0
+a9b3a5ff8155c19a0dacf82cec37f23815eab40f refs/remotes/origin/7.3.1
+f48d3c7808f6614ae4d9d20631363fadc2798664 refs/remotes/origin/7.3.5
+40fe7e9f9fa1bbf61be836445f8ea70768face1a refs/remotes/origin/7.3.6
+f9ca711d588d6af1431c86b9b28e937955ac03f8 refs/remotes/origin/8.0
+33addf8c2ef89c2192d11d15ce31e16ab91b70a8 refs/remotes/origin/9.0
+626c5a230a94e2f71c450d53d70efea2abf29337 refs/remotes/origin/master
+da4eecdbf0d50d920772fa07dcab7d3d88397d61 refs/remotes/origin/rdo-liberty
+06a7e93c1725e5359482c1defb7ee836fc347f77 refs/remotes/origin/rdo-mitaka
+01cafe2b4dddd279249bafd2807604fb103bda55 refs/remotes/origin/rdo-newton
+3b57587279be8d772bc6cee78beda3a78f3f73c4 refs/remotes/origin/rdo-ocata
+436d6c0a32f7184a7131a4c634f500f2607fe10a refs/remotes/origin/rdo-pike
+b07879ab51846885aa52f25c21b703e487418d5c refs/remotes/origin/rdo-queens
+2e92efb29718b17c86bd412b638a7c422485eb47 refs/remotes/origin/rdo-trunk

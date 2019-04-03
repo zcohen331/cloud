@@ -1,0 +1,355 @@
+function restore_permissions {
+  file=$1
+  sudo chmod 660 $file
+  rc=$?
+  if [ $rc -eq 0 ]; then
+    sudo chown qemu:jenkins $file
+    rc=$?
+    if [ $rc -eq 0 ]; then
+      sudo chmod 770 /var/lib/jenkins/VMs
+      rc=$?
+      if [ $rc -eq 0 ]; then
+        sudo chown qemu:jenkins /var/lib/jenkins/VMs
+        rc=$?
+        if [ $rc -eq 0 ]; then
+          sudo chmod 770 /var/lib/jenkins
+          rc=$?
+          if [ $rc -eq 0 ]; then
+            sudo chown qemu:jenkins /var/lib/jenkins
+            rc=$?
+          fi
+        fi
+      fi
+    fi
+  fi
+  return $rc
+}
+
+function source_rc {
+  file=$1
+  rc=255
+  if [ -e ${file}.local ]; then
+    source ${file}.local
+    rc=0
+  elif [ -e ${file}.v3 ]; then
+    source ${file}.v3
+    rc=0
+  elif [ -e $file ]; then
+    source $file
+    rc=0
+  fi
+  return $?
+}
+
+function wait_for_reboot {
+  rc='error'
+  timeout=900
+  inc=0
+  while [[ ! "$rc" =~ present ]] && [[ ! "$rcf" =~ present ]] && [[ $inc -lt $timeout ]]; do
+    rc=$(timeout 10 ssh -o LogLevel=quiet -o ConnectTimeout=10 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no stack@$undercloudip "if [ -e rebooted ]; then echo present; fi" 2>>$stderr)
+    rcf=$(timeout 10 ssh -o LogLevel=quiet -o ConnectTimeout=10 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no stack@$undercloudip "if [ -e failed ]; then echo present; fi" 2>>$stderr)
+    sleep 1
+    inc=`expr $inc + 1`
+  done
+  if [[ "$rcf" =~ present ]] || [[ $inc -ge $timeout ]]; then
+   rc=255
+  else
+   rc=0
+  fi
+  return $rc
+}
+
+function test_overcloud {
+  bash setup_image.sh
+  rc=$?
+  if [ $rc -eq 0 ]; then
+    bash create_network.sh
+    rc=$?
+    if [ $rc -eq 0 ]; then
+      bash boot_vm.sh
+      rc=$?
+      if [ $rc -eq 0 ]; then
+        bash delete_network.sh
+        rc=$?
+      fi
+    fi
+  fi
+  return $rc
+}
+
+function read_input {
+  input="no"
+  while [[ ! "$input" =~ ^yes$ ]]; do
+    echo 'Did you run your part? Type "yes" to continue : '
+    read input
+  done
+}
+
+function patch_openstack {
+  rc=255
+  this_patch=$1
+  url=$2
+  diff=$3
+  pushd /usr/share/openstack-tripleo-heat-templates
+  sudo curl -o $this_patch $url
+  if [ $? -eq 0 ]; then
+    sudo unzip $this_patch
+    if [ $? -eq 0 ]; then
+      sudo patch -p1 < $diff
+      rc=$?
+    fi
+  fi
+  popd
+  return $rc
+}
+
+function patch_code {
+  rc=255
+  sudo cp -r /usr/share/openstack-tripleo-heat-templates /usr/share/openstack-tripleo-heat-templates.BACKUP
+  if [ $? -eq 0 ]; then
+    patch_openstack "patch3.diff.zip" "https://review.openstack.org/changes/299303/revisions/537aaab152125498f550a48c76c8d2984bc70df8/patch?zip" "537aaab1.diff"
+    rc=$?
+  fi
+  return $rc
+}
+
+function update_nodes {
+  for node in $(nova list | grep "compute" | awk '{ print $2 }'); do
+    upgrade-non-controller.sh $node
+  done
+  for node in $(nova list | grep "ceph" | awk '{ print $2 }'); do
+    upgrade-non-controller.sh $node
+  done
+}
+
+function openstack_oc_update {
+  openstack overcloud deploy $updateargs_step1
+  rc=$?
+  if [ $rc -eq 0 ]; then
+    read_input
+    openstack overcloud deploy $updateargs_step2
+    rc=$?
+    if [ $rc -eq 0 ]; then
+      read_input
+      update_nodes
+      if [ $? -eq 0 ]; then
+        openstack overcloud deploy $updateargs_step3
+        rc=$?
+      fi
+    fi
+  fi
+  return $rc
+}
+
+function openstack_oc_deploy {
+  if [ -z $cephscale ] || [ -z $controlscale ] || [ -z $computescale ]; then
+    rc=255
+  elif [ \( $(expr $cephscale % 2) -eq 0 -a $cephscale -ne 0 \) ] || [ $(expr $controlscale % 2) -eq 0 -a $controlscale -eq 1 ]; then
+    rc=254
+  else
+    if [ -z "$kvmhost" ]; then
+      libvirttype=kvm
+    else
+      grep -q vmx /proc/cpuinfo
+      if [ $? -eq 0 ]; then
+        libvirttype=kvm
+      else
+        libvirttype=qemu
+      fi
+    fi
+    if [ $use_docker -eq 1 ]; then
+      deploymentargs="$deploymentargs -e /home/stack/${releasever}/overcloud_images.yaml"
+    fi
+    if [[ $deploymentargs =~ fencing.yaml ]]; then
+      bash generate_fencing_yaml.sh 2>>$stderr 1>>$stdout
+    fi
+    startlog "Deploying overcloud"
+    echo "openstack overcloud deploy $deploymentargs --libvirt-type $libvirttype" 2>>$stderr 1>>$stdout
+    openstack overcloud deploy $deploymentargs --libvirt-type $libvirttype 2>>$stderr 1>>$stdout
+    rc=$?
+    if [ $rc -eq 0 ]; then
+      endlog "done"
+      startlog "Cleaning up ssh-keys"
+      for ip in $(nova list | grep ACTIVE | awk -F= '{ print $2 }' | awk '{ print $1 }'); do
+        ssh-keygen -R $ip 2>>$stderr 1>>$stdout
+      done
+      endlog "done"
+    else
+      endlog "error"
+    fi
+  fi
+  return $rc
+}
+
+function delete_overcloud {
+  inc=0
+  rc=0
+  startlog "Deleting overcloud"
+  heat=$( heat stack-list 2>>$stderr | grep overcloud )
+  if [ ! -z "$heat" ]; then
+    heat stack-delete -y overcloud 2>>$stderr 1>>$stdout
+    while [ ! -z "$heat" ]; do
+      heat=$( heat stack-list 2>>$stderr | grep overcloud )
+      if [[ "$heat" =~ FAILED ]]; then
+        inc=$( expr $inc + 1 )
+        if [ $inc -le $maxfailedcount ]; then
+          endlog "failed"
+          startlog "Stack deletion failed! retrying"
+          heat stack-delete -y overcloud 2>>$stderr 1>>$stdout
+          sleep 1
+        else
+          endlog "failed"
+          rc=255
+          break
+        fi
+      fi
+      sleep 1
+    done
+  fi
+  if [ $rc -eq 0 ]; then
+    endlog "done"
+  else
+    endlog "error"
+  fi
+  return $rc
+}
+
+function gen_macs {
+    mac1=$(echo -n 52:54:00; dd bs=1 count=3 if=/dev/random 2>/dev/null |hexdump -v -e '/1 ":%02X"')
+    mac2=$(echo -n 52:54:00; dd bs=1 count=3 if=/dev/random 2>/dev/null |hexdump -v -e '/1 ":%02X"')
+}
+
+function enable_nfs {
+  if [ "$enablenfs" -eq 1 ]; then
+    startlog "Enabling NFS"
+    sudo systemctl enable nfs-server
+    sudo systemctl start nfs-server
+    sudo iptables -I INPUT -p udp --dport 20048  -j ACCEPT
+    sudo iptables -I INPUT -p tcp --dport 20048  -j ACCEPT
+    sudo iptables -I INPUT -p udp --dport 2049  -j ACCEPT
+    sudo iptables -I INPUT -p tcp --dport 2049 -j ACCEPT
+    sudo iptables -I INPUT -p udp --dport 111  -j ACCEPT
+    sudo iptables -I INPUT -p tcp --dport 111  -j ACCEPT
+    sudo mkdir -p /exports/cinder
+    sudo mkdir -p /exports/glance
+    sudo mkdir -p /exports/nova
+    sudo cat<<EOF>/etc/exports
+/exports/cinder *(rw,sync,no_root_squash)
+/exports/glance *(rw,sync,no_root_squash)
+/exports/nova *(rw,sync,no_root_squash)
+EOF
+    sudo exportfs -r
+    sudo chown glance:glance /exports/glance
+    sudo chown nova:nova /exports/nova
+    sudo chmod 777 /exports/cinder
+    sudo chmod 777 /exports/nova
+    endlog "done"
+  fi
+}
+
+function gen_xml {
+    cp template.xml $tmpfile
+    machine=$(sudo virsh capabilities | grep -A3 "domain.*kvm." | grep machine | tail -1 | awk -F\' '{ print $2 }' | sed -e 's/ //g')
+    if [ -z "$machine" ]; then
+      machine=$(sudo virsh capabilities | grep x86_64 -A4 | grep machine | head -1 | awk -F\> '{ print $1 }' | awk -F\< '{ print $1 }' | sed -e 's/ //g')
+      if [ -z "$machine" ]; then
+        machine=$(sudo virsh capabilities | grep x86_64 -A4 | grep "machine.*canonical" | head -1 | awk -F\' '{ print $2 }' | sed -e 's/ //g')
+      fi
+    fi
+    if [[ $installtype =~ rdo ]]; then
+      localtype=$rdorelease
+    else
+      localtype=$releasever
+    fi
+    model=$(virsh capabilities | grep '<model>'   | head -1 | awk -F\> '{ print $2 }' | awk -F\< '{ print $1 }')
+    if [[ $pxeenabled =~ off ]]; then
+      sed -i "/<boot order='1'\/>/d" $tmpfile
+    fi
+    sed -i "s/###MACHINE###/$machine/" $tmpfile
+    sed -i "s/###MODEL###/$model/" $tmpfile
+    sed -i "s/###MAC1###/$mac1/" $tmpfile
+    sed -i "s/###MAC2###/$mac2/" $tmpfile
+    sed -i "s/###MEM###/$memory/" $tmpfile
+    sed -i "s/###UUID###/$uuid/" $tmpfile
+    sed -i "s/###VCPUS###/$vcpus/" $tmpfile
+    sed -i "s/###TYPE-INC###/$type-$inc-$localtype/" $tmpfile
+    sed -i "s/###DISK###/$type-$inc-$localtype/" $tmpfile
+    sed -i "s|###PATH###|$tpath|" $tmpfile
+}
+
+function create_domain {
+    sudo virsh define $tmpfile 2>>$stderr 1>>$stdout
+    return $?
+}
+
+function start_domain {
+    sudo virsh start $vmname 2>>$stderr 1>>$stdout
+    return $?
+}
+
+function verify_domain {
+  while [ $try -lt 3 ]; do
+    sleep 1
+    sudo virsh list | grep -q $vmname
+    rc=$?
+    if [ $rc -ne 0 ]; then
+      start_domain
+      rc=$?
+    fi
+    try=$(( $try + 1 ))
+  done
+  return $rc
+}
+function cleanup {
+    rm -rf $tmpfile
+}
+
+function run_in_qemu {
+  rc=255
+  sudo dmidecode |grep -iq QEMU
+  if [ $? -eq 0 ]; then
+    rc=0
+  fi
+  return $rc
+}
+
+function validate_rpm {
+  rc=0
+  rpm -q libguestfs-tools 2>>$stderr 1>>$stdout
+  if [ $? -ne 0 ]; then
+    sudo yum install -y libguestfs-tools 2>>$stderr 1>>$stdout
+    rpm -q libguestfs-tools >>$stderr 1>>$stdout
+    if [ $? -ne 0 ]; then
+      rc=1
+    fi
+  fi
+  return $rc
+}
+
+function validate_env {
+  rc=255
+  sudo dmidecode |grep -iq QEMU
+  if [ $? -ne 0 ]; then
+    rc=0;
+  fi
+  return $rc
+}
+
+
+function startlog {
+  initial=$(date "+%s")
+  printf "%-60s" "$1"
+}
+
+function endlog {
+  message=$1
+  final=$(date "+%s")
+  elapsed=$(( $final - $initial ))
+  printf "%-15s\n" "$1 (${elapsed}s)"
+  if [[ $message =~ error ]]; then
+    if [ -d /home/stack ]; then
+      touch /home/stack/failed
+    fi
+  fi
+}
+
